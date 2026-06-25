@@ -1,0 +1,75 @@
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+
+  tests:
+    needs: lint
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: "sqlite:///:memory:"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: pytest tests --cov=. --cov-report=xml --cov-report=term-missing
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: coverage.xml
+
+  quality-gate:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: backend-coverage
+      - name: Verificar cobertura >= 80%
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+
+          coverage = float(ET.parse("coverage.xml").getroot().attrib["line-rate"]) * 100
+          print(f"Cobertura: {coverage:.1f}%")
+          if coverage < 80:
+              raise SystemExit("Quality Gate FAIL: cobertura < 80%")
+
+  docker-build:
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construir imagen Docker
+        run: docker build -t mundial-2026-backend .
+      - name: Validar API en contenedor
+        run: |
+          docker run -d --name backend -p 8000:8000 \
+            -e DATABASE_URL=sqlite:///:memory: \
+            mundial-2026-backend
+          for attempt in {1..15}; do
+            if curl --fail http://127.0.0.1:8000/; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs backend
+          exit 1
